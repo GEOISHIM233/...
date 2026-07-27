@@ -1,0 +1,6 @@
+Flask
+requests
+discord.py
+python-telegram-bot
+discord-webhook
+gunicorn
