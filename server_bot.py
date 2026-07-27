@@ -8,7 +8,7 @@ from datetime import datetime
 from flask import Flask, request, jsonify
 import os
 
-# ---------- CONFIG (via Render environment variables) ----------
+# ---------- CONFIG ----------
 DISCORD_TOKEN = os.environ.get("DISCORD_TOKEN", "")
 TELEGRAM_TOKEN = os.environ.get("TELEGRAM_TOKEN", "")
 TELEGRAM_CHAT_ID = os.environ.get("TELEGRAM_CHAT_ID", "-5330491816")
@@ -87,28 +87,21 @@ def send_discord_webhook(hit):
 # ---------- Flask App ----------
 app = Flask(__name__)
 
-# Flag to ensure bots only start once
 _bots_started = False
 
 def start_bots():
-    """Start Discord and Telegram bots in background threads."""
     global _bots_started
     if _bots_started:
         return
     _bots_started = True
-    
-    # Small delay to let Flask initialize properly
     time.sleep(2)
-    
     if DISCORD_TOKEN and DISCORD_TOKEN != "YOUR_DISCORD_BOT_TOKEN":
         threading.Thread(target=run_discord_bot, daemon=True).start()
         print("[Bots] Discord bot started.")
-    
     if ENABLE_TELEGRAM and TELEGRAM_TOKEN != "YOUR_TELEGRAM_BOT_TOKEN":
         threading.Thread(target=run_telegram_bot, daemon=True).start()
         print("[Bots] Telegram bot started.")
 
-# Start bots on the first request (after Flask is ready)
 @app.before_request
 def before_first_request():
     start_bots()
@@ -216,14 +209,15 @@ def run_discord_bot():
         except Exception as e:
             await ctx.send(f"Error: {e}")
 
-    @bot.command(name='help')
-    async def help_cmd(ctx):
+    # Renamed from 'help' to 'commands' to avoid conflict with built-in help
+    @bot.command(name='commands')
+    async def commands_list(ctx):
         help_text = """
 **Available commands:**
 `/howmanyhits` – Show 10 most recent hits
 `/total` – Show total hit count
 `/top` – Show hit with most Robux
-`/help` – Show this message
+`/commands` – Show this message
 """
         await ctx.send(help_text)
 
@@ -287,19 +281,20 @@ def run_telegram_bot():
             except Exception as e:
                 await update.message.reply_text(f"Error: {e}")
 
-        async def help_cmd(update: Update, context: ContextTypes.DEFAULT_TYPE):
+        # Renamed to 'commands' as well
+        async def commands_list(update: Update, context: ContextTypes.DEFAULT_TYPE):
             help_text = """Available commands:
 /howmanyhits – Show 10 most recent hits
 /total – Show total hit count
 /top – Show hit with most Robux
-/help – Show this message"""
+/commands – Show this message"""
             await update.message.reply_text(help_text)
 
         app_tele = Application.builder().token(TELEGRAM_TOKEN).build()
         app_tele.add_handler(CommandHandler("howmanyhits", how_many_hits))
         app_tele.add_handler(CommandHandler("total", total_hits))
         app_tele.add_handler(CommandHandler("top", top_robux))
-        app_tele.add_handler(CommandHandler("help", help_cmd))
+        app_tele.add_handler(CommandHandler("commands", commands_list))
         print("[Telegram] Bot started polling.")
         app_tele.run_polling()
     except Exception as e:
@@ -307,19 +302,13 @@ def run_telegram_bot():
 
 # ---------- Local Development ----------
 if __name__ == "__main__":
-    # For local testing: python server_bot.py --server
     if len(sys.argv) > 1 and sys.argv[1] == "--server":
         init_db()
-        # Start Flask in a thread
         threading.Thread(target=app.run, kwargs={'host':'0.0.0.0','port':5000,'debug':False}, daemon=True).start()
-        # Start bots after a delay
         time.sleep(2)
         start_bots()
-        # Keep main thread alive
         while True:
             time.sleep(1)
     else:
-        # For Render: gunicorn will run the app
         print("Starting server (gunicorn) ...")
         init_db()
-        # Bots will be started on first request via @app.before_request
